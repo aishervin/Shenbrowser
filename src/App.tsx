@@ -79,151 +79,152 @@ export default function App() {
   }, []);
 
   // Handler: Start an Agent Run
-  const handleStartRun = async (config: {
+  const handleStartRun = (config: {
     task: string;
     model: string;
     proxyCountryCode: string;
     record: boolean;
     keepAlive: number;
     profileId?: string;
-  }) => {
-    setIsRunning(true);
-    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+  }): Promise<AgentRun> => {
+    return new Promise(async (resolve, reject) => {
+      setIsRunning(true);
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
 
-    const initialRunState: AgentRun = {
-      id: `run-${Date.now()}`,
-      task: config.task,
-      model: config.model,
-      status: 'running',
-      createdAt: new Date().toISOString(),
-      events: [
-        {
-          id: 1,
-          type: 'run.queued',
-          data: { message: 'Dispatching task to Browser Use Cloud v4 pod...' },
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    };
-
-    setCurrentRun(initialRunState);
-
-    try {
-      const res = await fetch('/api/agent/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          task: config.task,
-          model: config.model,
-          proxyCountryCode: config.proxyCountryCode,
-          record: config.record,
-          keepAlive: config.keepAlive,
-          profileId: config.profileId,
-          testMode: !status?.browserUseConfigured,
-        }),
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || 'Failed to dispatch agent run');
-      }
-
-      const runData = await res.json();
-
-      const updatedRun: AgentRun = {
-        ...initialRunState,
-        id: runData.id || initialRunState.id,
-        sessionId: runData.sessionId,
-        status: runData.status || 'running',
-        liveUrl: runData.liveUrl,
-        isSimulated: runData.isSimulated,
+      const initialRunState: AgentRun = {
+        id: `run-${Date.now()}`,
+        task: config.task,
+        model: config.model,
+        status: 'running',
+        createdAt: new Date().toISOString(),
+        events: [
+          {
+            id: 1,
+            type: 'run.queued',
+            data: { message: 'Dispatching task to Browser Use Cloud v4 pod...' },
+            createdAt: new Date().toISOString(),
+          },
+        ],
       };
 
-      setCurrentRun(updatedRun);
+      setCurrentRun(initialRunState);
 
-      // Start Polling Loop for status & action events
-      let pollCount = 0;
-      pollTimerRef.current = setInterval(async () => {
-        pollCount++;
-        try {
-          // 1. Poll Status
-          const statusRes = await fetch(`/api/agent/run/${updatedRun.id}/status`);
-          const statusData = await statusRes.json();
+      try {
+        const res = await fetch('/api/agent/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            task: config.task,
+            model: config.model,
+            proxyCountryCode: config.proxyCountryCode,
+            record: config.record,
+            keepAlive: config.keepAlive,
+            profileId: config.profileId,
+            testMode: !status?.browserUseConfigured,
+          }),
+        });
 
-          // 2. Poll Events
-          const eventsRes = await fetch(`/api/agent/run/${updatedRun.id}/events`);
-          const eventsData = await eventsRes.json();
-
-          const currentEvents = eventsData.items || [];
-
-          // In simulation mode without key, simulate progress events
-          if (updatedRun.isSimulated) {
-            if (pollCount === 2) {
-              currentEvents.push({
-                id: 2,
-                type: 'browser.navigate',
-                data: { url: 'https://news.ycombinator.com', status: 200 },
-                createdAt: new Date().toISOString(),
-              });
-            } else if (pollCount === 4) {
-              currentEvents.push({
-                id: 3,
-                type: 'browser.extract',
-                data: { itemsExtracted: 5, selector: '.athing' },
-                createdAt: new Date().toISOString(),
-              });
-            } else if (pollCount >= 6) {
-              statusData.status = 'completed';
-            }
-          }
-
-          const isTerminal =
-            statusData.status === 'completed' ||
-            statusData.status === 'failed' ||
-            statusData.status === 'cancelled';
-
-          if (isTerminal) {
-            clearInterval(pollTimerRef.current);
-            setIsRunning(false);
-
-            // Fetch final summary
-            const summaryRes = await fetch(`/api/agent/run/${updatedRun.id}`);
-            const summaryData = await summaryRes.json();
-
-            const finalRun: AgentRun = {
-              ...updatedRun,
-              status: statusData.status,
-              result: summaryData.result || [
-                { title: 'Show HN: Browser Use Cloud v4 Integration', points: 342, author: 'developer' },
-                { title: 'Modern Stealth Browsers and AI Agents', points: 285, author: 'cloudagent' },
-                { title: 'Autonomous Web Automation at Scale', points: 198, author: 'vibecoder' },
-              ],
-              finishedAt: new Date().toISOString(),
-              events: currentEvents,
-            };
-
-            setCurrentRun(finalRun);
-            setRunsHistory((prev) => [finalRun, ...prev.filter((r) => r.id !== finalRun.id)]);
-          } else {
-            setCurrentRun((prev) => (prev ? { ...prev, status: statusData.status, events: currentEvents } : null));
-          }
-        } catch (pollErr) {
-          console.warn('Poll error:', pollErr);
+        if (!res.ok) {
+          const errorData = await res.json();
+          throw new Error(errorData.error || 'Failed to dispatch agent run');
         }
-      }, 2500);
-    } catch (err: any) {
-      console.error('Run failed to start:', err);
-      setIsRunning(false);
-      setCurrentRun((prev) =>
-        prev
-          ? {
-              ...prev,
-              status: 'failed',
-              error: err?.message || 'Agent task execution failed',
+
+        const runData = await res.json();
+
+        const updatedRun: AgentRun = {
+          ...initialRunState,
+          id: runData.id || initialRunState.id,
+          sessionId: runData.sessionId,
+          status: runData.status || 'running',
+          liveUrl: runData.liveUrl,
+          isSimulated: runData.isSimulated,
+        };
+
+        setCurrentRun(updatedRun);
+
+        // Start Polling Loop for status & action events
+        let pollCount = 0;
+        pollTimerRef.current = setInterval(async () => {
+          pollCount++;
+          try {
+            // 1. Poll Status
+            const statusRes = await fetch(`/api/agent/run/${updatedRun.id}/status`);
+            const statusData = await statusRes.json();
+
+            // 2. Poll Events
+            const eventsRes = await fetch(`/api/agent/run/${updatedRun.id}/events`);
+            const eventsData = await eventsRes.json();
+
+            const currentEvents = eventsData.items || [];
+
+            // In simulation mode without key, simulate progress events
+            if (updatedRun.isSimulated) {
+              if (pollCount === 2) {
+                currentEvents.push({
+                  id: 2,
+                  type: 'browser.navigate',
+                  data: { url: 'https://news.ycombinator.com', status: 200 },
+                  createdAt: new Date().toISOString(),
+                });
+              } else if (pollCount === 4) {
+                currentEvents.push({
+                  id: 3,
+                  type: 'browser.extract',
+                  data: { itemsExtracted: 5, selector: '.athing' },
+                  createdAt: new Date().toISOString(),
+                });
+              } else if (pollCount >= 6) {
+                statusData.status = 'completed';
+              }
             }
-          : null
-      );
-    }
+
+            const isTerminal =
+              statusData.status === 'completed' ||
+              statusData.status === 'failed' ||
+              statusData.status === 'cancelled';
+
+            if (isTerminal) {
+              if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+              setIsRunning(false);
+
+              // Fetch final summary
+              const summaryRes = await fetch(`/api/agent/run/${updatedRun.id}`);
+              const summaryData = await summaryRes.json();
+
+              const finalRun: AgentRun = {
+                ...updatedRun,
+                status: statusData.status,
+                result: summaryData.result || [
+                  { title: 'Show HN: Browser Use Cloud v4 Integration', points: 342, author: 'developer' },
+                  { title: 'Modern Stealth Browsers and AI Agents', points: 285, author: 'cloudagent' },
+                  { title: 'Autonomous Web Automation at Scale', points: 198, author: 'vibecoder' },
+                ],
+                finishedAt: new Date().toISOString(),
+                events: currentEvents,
+              };
+
+              setCurrentRun(finalRun);
+              setRunsHistory((prev) => [finalRun, ...prev.filter((r) => r.id !== finalRun.id)]);
+              resolve(finalRun);
+            } else {
+              setCurrentRun((prev) => (prev ? { ...prev, status: statusData.status, events: currentEvents } : null));
+            }
+          } catch (pollErr) {
+            console.warn('Poll error:', pollErr);
+          }
+        }, 2500);
+      } catch (err: any) {
+        console.error('Run failed to start:', err);
+        setIsRunning(false);
+        const errorRun: AgentRun = {
+          ...initialRunState,
+          status: 'failed',
+          error: err?.message || 'Agent task execution failed',
+        };
+        setCurrentRun(errorRun);
+        reject(err);
+      }
+    });
   };
 
   // Handler: Cancel Agent Run
@@ -377,8 +378,9 @@ export default function App() {
       <main className="flex-1 flex flex-col overflow-hidden">
         {activeTab === 'harvester' && (
           <GoogleAccountsHarvesterTab
+            currentRun={currentRun}
             onStartAgentTask={async (task, profileId) => {
-              await handleStartRun({
+              return await handleStartRun({
                 task,
                 model: 'gpt-5.6-luna',
                 proxyCountryCode: 'de',
@@ -399,7 +401,7 @@ export default function App() {
           <AgentRunnerTab
             currentRun={currentRun}
             isRunning={isRunning}
-            onStartRun={handleStartRun}
+            onStartRun={async (config) => { await handleStartRun(config); }}
             onCancelRun={handleCancelRun}
             onOpenPromptArchitectWithTask={(task) => {
               setActivePromptText(task);

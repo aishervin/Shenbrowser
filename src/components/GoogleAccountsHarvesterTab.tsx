@@ -23,6 +23,8 @@ import {
   ChevronRight,
   Edit2,
   ArrowRight,
+  Terminal,
+  ShieldAlert,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import {
@@ -30,16 +32,19 @@ import {
   ApiHarvestService,
   HarvestedKey,
   BrowserSession,
+  AgentRun,
 } from '../types/browserUse';
 
 interface GoogleAccountsHarvesterTabProps {
-  onStartAgentTask: (task: string, profileId?: string) => Promise<void>;
+  currentRun: AgentRun | null;
+  onStartAgentTask: (task: string, profileId?: string) => Promise<AgentRun>;
   onLaunchInteractiveBrowser: (profileId: string, startUrl: string) => Promise<BrowserSession | null>;
   activeBrowser: BrowserSession | null;
   onStopActiveBrowser: () => Promise<void>;
 }
 
 export const GoogleAccountsHarvesterTab: React.FC<GoogleAccountsHarvesterTabProps> = ({
+  currentRun,
   onStartAgentTask,
   onLaunchInteractiveBrowser,
   activeBrowser,
@@ -181,25 +186,56 @@ export const GoogleAccountsHarvesterTab: React.FC<GoogleAccountsHarvesterTabProp
         const harvestPrompt = `You have an active logged-in Google session.
 ${service.instructionsPrompt}
 Target Service: ${service.name}
-Output the final extracted API Key strictly in JSON format: {"service": "${service.name}", "apiKey": "..."}.`;
+Strict Extraction Goal: Find the API key.
+Output the final extracted API Key strictly in JSON format: {"service": "${service.name}", "apiKey": "..."}.
+If you cannot find it, explain why in a single sentence.`;
 
-        await onStartAgentTask(harvestPrompt, profile.id);
+        const runResult = await onStartAgentTask(harvestPrompt, profile.id);
 
-        // Add a mock harvested key if in test/simulation mode
-        const newKey: HarvestedKey = {
-          id: `key-${Date.now()}`,
-          serviceId: service.id,
-          serviceName: service.name,
-          profileId: profile.id,
-          profileName: profile.name,
-          apiKey: service.id === 'groq' ? `gsk_${Math.random().toString(36).substring(2, 15)}` :
-                  service.id === 'huggingface' ? `hf_${Math.random().toString(36).substring(2, 18)}` :
-                  service.id === 'tavily' ? `tvly-${Math.random().toString(36).substring(2, 14)}` :
-                  `sk-api-${Math.random().toString(36).substring(2, 16)}`,
-          createdAt: new Date().toISOString(),
-        };
+        // Extract key from result
+        let extractedKey: string | null = null;
+        if (runResult.result) {
+          const res = runResult.result;
+          if (typeof res === 'object' && res.apiKey) {
+            extractedKey = String(res.apiKey);
+          } else if (typeof res === 'string') {
+            // Attempt to parse JSON from string
+            try {
+              const parsed = JSON.parse(res.replace(/```json|```/g, '').trim());
+              extractedKey = parsed.apiKey || null;
+            } catch (e) {
+              // Fallback regex for keys
+              const matches = res.match(/(gsk_|hf_|tvly-|sk-or-|csk-)[a-zA-Z0-9_-]+/);
+              if (matches) extractedKey = matches[0];
+            }
+          }
+        }
 
-        setHarvestedKeys((prev) => [newKey, ...prev]);
+        if (extractedKey) {
+          const newKey: HarvestedKey = {
+            id: `key-${Date.now()}-${service.id}`,
+            serviceId: service.id,
+            serviceName: service.name,
+            profileId: profile.id,
+            profileName: profile.name,
+            apiKey: extractedKey,
+            createdAt: new Date().toISOString(),
+          };
+          setHarvestedKeys((prev) => [newKey, ...prev]);
+        } else if (runResult.isSimulated) {
+          // If in simulation mode, add a "Simulated Key" so the UI feels responsive
+          const simKey: HarvestedKey = {
+            id: `key-sim-${Date.now()}-${service.id}`,
+            serviceId: service.id,
+            serviceName: service.name,
+            profileId: profile.id,
+            profileName: profile.name,
+            apiKey: service.id === 'groq' ? `gsk_SIM_${Math.random().toString(36).substring(2, 10)}` : `sk-sim-${Math.random().toString(36).substring(2, 10)}`,
+            createdAt: new Date().toISOString(),
+            notes: 'این یک کلید شبیه‌سازی شده است چون برنامه در حالت دمو اجرا می‌شود.'
+          };
+          setHarvestedKeys((prev) => [simKey, ...prev]);
+        }
       } catch (err) {
         console.error(`Harvest failed for ${service.name}:`, err);
       }
@@ -308,85 +344,40 @@ Output the final extracted API Key strictly in JSON format: {"service": "${servi
 
           <div className="relative w-full min-h-[420px] bg-slate-950 rounded-xl overflow-hidden border border-slate-800 flex items-center justify-center">
             {activeBrowser.isSimulated ? (
-              <div className="w-full max-w-md p-6 bg-slate-900/90 rounded-2xl border border-slate-700 shadow-2xl space-y-4 my-4">
-                <div className="flex items-center justify-center space-x-2">
-                  <span className="text-2xl">🌐</span>
-                  <span className="text-sm font-bold text-white tracking-wide">Google Sign-In Simulator</span>
+              <div className="flex flex-col items-center justify-center p-8 text-center space-y-4 max-w-md">
+                <div className="w-16 h-16 rounded-full bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+                  <ShieldAlert className="w-8 h-8" />
                 </div>
-
-                {simStep === 'credentials' && (
-                  <div className="space-y-3">
-                    <p className="text-xs text-slate-300 text-center">
-                      ایمیل و رمز اکانت گوگل خود را برای اتصال به این پروفایل وارد کنید:
-                    </p>
-                    <div>
-                      <label className="text-[11px] text-slate-400 block mb-1">آدرس ایمیل گوگل (Gmail)</label>
-                      <input
-                        type="email"
-                        value={simEmail}
-                        onChange={(e) => setSimEmail(e.target.value)}
-                        placeholder="yourname@gmail.com"
-                        className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[11px] text-slate-400 block mb-1">رمز عبور</label>
-                      <input
-                        type="password"
-                        value={simPassword}
-                        onChange={(e) => setSimPassword(e.target.value)}
-                        placeholder="••••••••••••"
-                        className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500"
-                      />
-                    </div>
-                    <button
-                      onClick={() => setSimStep('2fa')}
-                      disabled={!simEmail.trim()}
-                      className="w-full py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
-                    >
-                      مرحله بعد: تایید دومرحله‌ای (2FA)
-                    </button>
-                  </div>
-                )}
-
-                {simStep === '2fa' && (
-                  <div className="space-y-3">
-                    <div className="p-2.5 bg-blue-950/40 border border-blue-500/30 rounded-xl text-xs text-blue-200 text-center">
-                      📱 درخواست تایید ورود یا پیامک حاوی کد تایید برای شماره شما ارسال شد.
-                    </div>
-                    <div>
-                      <label className="text-[11px] text-slate-400 block mb-1">کد تایید ۶ رقمی ۲FA یا تایید در گوشی</label>
-                      <input
-                        type="text"
-                        value={sim2fa}
-                        onChange={(e) => setSim2fa(e.target.value)}
-                        placeholder="123456"
-                        maxLength={6}
-                        className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-center font-mono text-cyan-300 tracking-widest focus:outline-none focus:border-cyan-500"
-                      />
-                    </div>
-                    <button
-                      onClick={() => {
-                        setSimStep('done');
-                        handleFinishLogin();
-                      }}
-                      className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-lg shadow-emerald-500/20"
-                    >
-                      تکمیل ورود و ذخیره نشست در پروفایل
-                    </button>
-                  </div>
-                )}
+                <h3 className="text-lg font-bold text-white">نیاز به کلید API معتبر</h3>
+                <p className="text-sm text-slate-400">
+                  برای انجام **لاگین واقعی گوگل** و ذخیره کوکی‌ها در پروفایل، باید یک کلید API معتبر از <a href="https://cloud.eu.browser-use.com" target="_blank" className="text-cyan-400 underline">Browser Use Cloud</a> دریافت کرده و در بخش Secrets وارد کنید.
+                </p>
+                <p className="text-xs text-amber-300/80 bg-amber-500/10 p-3 rounded-lg border border-amber-500/20">
+                  ⚠️ در حالت دمو (Simulation)، مرورگر ابری واقعی باز نمی‌شود و امکان ورود واقعی به جیمیل وجود ندارد.
+                </p>
+                <button
+                  onClick={() => {
+                    onStopActiveBrowser();
+                    setActiveLoginProfile(null);
+                  }}
+                  className="px-6 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold transition-all"
+                >
+                  فهمیدم، بستن پنجره
+                </button>
               </div>
             ) : activeBrowser.liveUrl ? (
-              <iframe
-                src={activeBrowser.liveUrl}
-                title="Live Google Login Window"
-                className="w-full h-full min-h-[420px] border-0"
-                allow="clipboard-read; clipboard-write"
-              />
+              <div className="w-full h-full flex flex-col">
+                <iframe
+                  src={activeBrowser.liveUrl}
+                  title="Live Google Login Window"
+                  className="w-full h-full min-h-[500px] border-0"
+                  allow="clipboard-read; clipboard-write"
+                />
+              </div>
             ) : (
-              <div className="h-full py-24 flex items-center justify-center text-slate-400 text-xs">
-                در حال بارگذاری صفحه امن لاگین گوگل...
+              <div className="h-full py-24 flex flex-col items-center justify-center text-slate-400 text-xs space-y-3">
+                <RefreshCw className="w-6 h-6 animate-spin text-cyan-500" />
+                <span>در حال بارگذاری مرورگر ابری واقعی Chrome...</span>
               </div>
             )}
           </div>
@@ -506,10 +497,43 @@ Output the final extracted API Key strictly in JSON format: {"service": "${servi
             disabled={isHarvesting || selectedServiceIds.length === 0}
             className="flex items-center space-x-2 px-5 py-2.5 rounded-xl text-xs font-bold bg-gradient-to-r from-cyan-600 via-blue-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white shadow-lg shadow-cyan-500/25 transition-all cursor-pointer disabled:opacity-50"
           >
-            <Bot className="w-4 h-4" />
-            <span>{isHarvesting ? 'در حال اجرای ایجنت در وب...' : `🚀 دریافت خودکار کلیدها (${selectedServiceIds.length} سرویس)`}</span>
+            {isHarvesting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Bot className="w-4 h-4" />}
+            <span>{isHarvesting ? 'در حال استخراج کلیدها...' : `🚀 دریافت خودکار کلیدها (${selectedServiceIds.length} سرویس)`}</span>
           </button>
         </div>
+
+        {/* Live Agent Terminal (Visible when harvesting) */}
+        {isHarvesting && (
+          <div className="rounded-xl bg-slate-950 border border-slate-800 overflow-hidden flex flex-col animate-in slide-in-from-top-4 duration-300">
+            <div className="px-3 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+                <span className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">Live Execution Logs</span>
+              </div>
+              <div className="flex items-center space-x-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-500 animate-pulse" />
+                <span className="text-[10px] text-cyan-400 font-mono">Agent Active</span>
+              </div>
+            </div>
+            <div className="p-3 h-48 overflow-y-auto font-mono text-[11px] space-y-1.5">
+              {currentRun?.events && currentRun.events.length > 0 ? (
+                currentRun.events.map((ev, idx) => (
+                  <div key={idx} className="flex items-start space-x-2">
+                    <span className="text-slate-600 shrink-0">[{new Date(ev.createdAt).toLocaleTimeString([], { hour12: false })}]</span>
+                    <span className="text-cyan-500 font-bold shrink-0">{ev.type.split('.').pop()}:</span>
+                    <span className="text-slate-300 break-all">
+                      {typeof ev.data === 'object' ? JSON.stringify(ev.data) : String(ev.data)}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <div className="h-full flex items-center justify-center text-slate-500 animate-pulse italic">
+                  Initializing secure browser session...
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Services Checkbox Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
