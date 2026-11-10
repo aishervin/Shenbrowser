@@ -1,0 +1,6 @@
+{
+  "name": "AI Browser Agent Builder",
+  "description": "A workflow application to manage cloud browsers and AI-driven web automation with live observability, automated task execution, and smart Gemini prompt builder.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
