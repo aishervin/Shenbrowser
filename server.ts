@@ -16,19 +16,21 @@ const port = process.env.PORT || 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Base URL for Browser Use Cloud EU deployment
-const BROWSER_USE_BASE_URL =
-  process.env.BROWSER_USE_BASE_URL || 'https://api.eu.browser-use.com/api/v4';
+// Base URL for Browser Use Cloud deployment (with auto-detect failover)
+const EU_BASE_URL = 'https://api.eu.browser-use.com/api/v4';
+const GLOBAL_BASE_URL = 'https://api.browser-use.com/api/v4';
+
+let ACTIVE_BASE_URL = EU_BASE_URL;
 
 // Helper to obtain authenticated BrowserUse client
-function getBrowserClient(): BrowserUse | null {
+function getBrowserClient(baseUrl?: string): BrowserUse | null {
   const apiKey = process.env.BROWSER_USE_API_KEY;
   if (!apiKey || !apiKey.trim()) {
     return null;
   }
   return new BrowserUse({
     apiKey: apiKey.trim(),
-    baseUrl: BROWSER_USE_BASE_URL,
+    baseUrl: baseUrl || ACTIVE_BASE_URL,
   });
 }
 
@@ -82,7 +84,7 @@ async function callGeminiWithRetry(params: any, retries = 2) {
 let cachedKeyStatus: { isValid: boolean; error?: string } | null = null;
 let lastKeyChecked: string | null = null;
 
-async function checkApiKeyValidity(client: BrowserUse | null): Promise<{ isValid: boolean; error?: string }> {
+async function checkApiKeyValidity(client: BrowserUse | null): Promise<{ isValid: boolean; error?: string; region?: string }> {
   const currentKey = process.env.BROWSER_USE_API_KEY || '';
   if (!client || !currentKey.trim()) {
     return { isValid: false, error: 'BROWSER_USE_API_KEY is not configured in environment secrets.' };
@@ -90,13 +92,35 @@ async function checkApiKeyValidity(client: BrowserUse | null): Promise<{ isValid
   if (lastKeyChecked === currentKey && cachedKeyStatus) {
     return cachedKeyStatus;
   }
+
+  // Try EU first
   try {
-    await client.profiles.list({ pageSize: 1 });
+    const euClient = getBrowserClient(EU_BASE_URL)!;
+    await euClient.profiles.list({ pageSize: 1 });
+    ACTIVE_BASE_URL = EU_BASE_URL;
     cachedKeyStatus = { isValid: true };
     lastKeyChecked = currentKey;
-    return cachedKeyStatus;
+    return { ...cachedKeyStatus, region: 'EU' };
   } catch (err: any) {
-    const errorMsg = String(err?.message || err || 'Invalid API key');
+    // If EU fails with auth error, try Global
+    const isAuthError = err?.message?.includes('Invalid API key') || err?.status === 401;
+    if (isAuthError) {
+      try {
+        const globalClient = getBrowserClient(GLOBAL_BASE_URL)!;
+        await globalClient.profiles.list({ pageSize: 1 });
+        ACTIVE_BASE_URL = GLOBAL_BASE_URL;
+        cachedKeyStatus = { isValid: true };
+        lastKeyChecked = currentKey;
+        return { ...cachedKeyStatus, region: 'Global' };
+      } catch (gErr: any) {
+        const errorMsg = String(gErr?.message || gErr || 'Invalid API key on all regions');
+        cachedKeyStatus = { isValid: false, error: errorMsg };
+        lastKeyChecked = currentKey;
+        return cachedKeyStatus;
+      }
+    }
+    
+    const errorMsg = String(err?.message || err || 'Network error');
     cachedKeyStatus = { isValid: false, error: errorMsg };
     lastKeyChecked = currentKey;
     return cachedKeyStatus;
@@ -116,7 +140,8 @@ app.get('/api/status', async (req, res) => {
     browserUseError: validity.error || null,
     browserUseKeyMasked: buKey ? `bu_***${buKey.slice(-4)}` : null,
     geminiConfigured: Boolean(geminiKey && geminiKey.trim().length > 0),
-    baseUrl: BROWSER_USE_BASE_URL,
+    baseUrl: ACTIVE_BASE_URL,
+    region: (validity as any).region || (validity.isValid ? 'Auto' : 'Unknown'),
     recommendedModels: ['gpt-5.6-luna', 'gpt-5.6-sol'],
   });
 });
