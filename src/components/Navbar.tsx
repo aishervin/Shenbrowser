@@ -16,8 +16,8 @@ import {
 import { StatusResponse, BrowserSession } from '../types/browserUse';
 
 interface NavbarProps {
-  activeTab: 'runner' | 'browser' | 'architect' | 'templates' | 'history';
-  onSelectTab: (tab: 'runner' | 'browser' | 'architect' | 'templates' | 'history') => void;
+  activeTab: 'runner' | 'browser' | 'harvester' | 'architect' | 'templates' | 'history';
+  onSelectTab: (tab: 'runner' | 'browser' | 'harvester' | 'architect' | 'templates' | 'history') => void;
   status: StatusResponse | null;
   activeBrowser: BrowserSession | null;
   onStopActiveBrowser: () => void;
@@ -60,6 +60,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         <div className="flex items-center p-1 bg-slate-900 border border-slate-800 rounded-xl overflow-x-auto scrollbar-none">
           {[
             { id: 'runner', label: 'Agent Runner', icon: Bot },
+            { id: 'harvester', label: '🔐 Google & Keys', icon: Key },
             { id: 'browser', label: 'Cloud Browsers', icon: Monitor },
             { id: 'architect', label: 'Prompt Architect', icon: Sparkles },
             { id: 'templates', label: 'Templates', icon: Layers },
@@ -116,6 +117,8 @@ export const Navbar: React.FC<NavbarProps> = ({
             className={`flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer border ${
               status?.browserUseConfigured
                 ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20'
+                : status?.browserUseKeyPresent
+                ? 'bg-rose-500/10 text-rose-300 border-rose-500/30 hover:bg-rose-500/20'
                 : 'bg-amber-500/10 text-amber-300 border-amber-500/30 hover:bg-amber-500/20'
             }`}
             title="Browser Use Cloud API Credentials"
@@ -126,10 +129,15 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <span className="hidden sm:inline">Connected</span>
                 <span className="font-mono text-[10px] opacity-75">{status.browserUseKeyMasked}</span>
               </>
+            ) : status?.browserUseKeyPresent ? (
+              <>
+                <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                <span>کلید نامعتبر (راهنما)</span>
+              </>
             ) : (
               <>
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-                <span>API Key Setup</span>
+                <span>حالت شبیه‌ساز (تنظیم کلید)</span>
               </>
             )}
           </button>

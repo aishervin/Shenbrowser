@@ -7,6 +7,37 @@ export type RunStatusType =
   | 'stopping'
   | 'stopped';
 
+export interface ProfileItem {
+  id: string;
+  name: string;
+  email?: string;
+  status: 'authenticated' | 'needs_login' | 'unverified';
+  createdAt?: string;
+  lastUsedAt?: string;
+  isSimulated?: boolean;
+}
+
+export interface ApiHarvestService {
+  id: string;
+  name: string;
+  logo: string;
+  websiteUrl: string;
+  freeTierDescription: string;
+  keyUrl: string;
+  instructionsPrompt: string;
+}
+
+export interface HarvestedKey {
+  id: string;
+  serviceId: string;
+  serviceName: string;
+  profileId: string;
+  profileName: string;
+  apiKey: string;
+  createdAt: string;
+  notes?: string;
+}
+
 export interface BrowserSession {
   id: string;
   status: 'running' | 'stopped' | 'failed' | 'timeout';
@@ -14,6 +45,7 @@ export interface BrowserSession {
   cdpUrl?: string;
   timeout?: number;
   proxyCountryCode?: string | null;
+  profileId?: string | null;
   enableRecording?: boolean;
   createdAt?: string;
   expiresAt?: string;
@@ -33,6 +65,7 @@ export interface AgentRun {
   status: RunStatusType;
   task: string;
   model: string;
+  profileId?: string;
   liveUrl?: string;
   recordingUrl?: string;
   result?: any;
@@ -57,6 +90,9 @@ export interface WorkflowTemplate {
 
 export interface StatusResponse {
   browserUseConfigured: boolean;
+  browserUseKeyPresent?: boolean;
+  browserUseKeyValid?: boolean;
+  browserUseError?: string | null;
   browserUseKeyMasked: string | null;
   geminiConfigured: boolean;
   baseUrl: string;

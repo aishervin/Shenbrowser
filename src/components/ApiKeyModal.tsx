@@ -71,10 +71,15 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                 <ShieldCheck className="w-3.5 h-3.5" />
                 <span>Connected ({status.browserUseKeyMasked})</span>
               </span>
+            ) : status?.browserUseKeyPresent ? (
+              <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>کلید نامعتبر ({status.browserUseKeyMasked})</span>
+              </span>
             ) : (
               <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
                 <AlertTriangle className="w-3.5 h-3.5" />
-                <span>Not Detected</span>
+                <span>حالت شبیه‌سازی فعال</span>
               </span>
             )}
           </div>
@@ -82,7 +87,9 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
           <p className="text-xs text-slate-300 pt-1">
             {status?.browserUseConfigured
               ? 'Your Browser Use Cloud EU credentials are authenticated. All agent runs and cloud browser instances will provision over real stealth residential proxies.'
-              : 'The BROWSER_USE_API_KEY environment secret is not set yet. The applet will run in interactive Simulation Mode until you add your key.'}
+              : status?.browserUseKeyPresent
+              ? (status?.browserUseError || 'کلید فعلی نامعتبر یا منقضی شده است. لطفاً کلید جدیدی از داشبورد Browser Use Cloud ساخته و در Secrets جایگزین کنید. در حال حاضر تمام بخش‌ها در حالت شبیه‌ساز امن کار می‌کنند.')
+              : 'The BROWSER_USE_API_KEY environment secret is not set yet. The applet is running in interactive Simulation Mode until you add your key.'}
           </p>
         </div>
 

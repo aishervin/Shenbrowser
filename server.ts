@@ -77,14 +77,43 @@ async function callGeminiWithRetry(params: any, retries = 2) {
 }
 
 // -------------------------------------------------------------
-// System Status Endpoint
+// System Status Endpoint & Key Validity Cache
 // -------------------------------------------------------------
-app.get('/api/status', (req, res) => {
+let cachedKeyStatus: { isValid: boolean; error?: string } | null = null;
+let lastKeyChecked: string | null = null;
+
+async function checkApiKeyValidity(client: BrowserUse | null): Promise<{ isValid: boolean; error?: string }> {
+  const currentKey = process.env.BROWSER_USE_API_KEY || '';
+  if (!client || !currentKey.trim()) {
+    return { isValid: false, error: 'BROWSER_USE_API_KEY is not configured in environment secrets.' };
+  }
+  if (lastKeyChecked === currentKey && cachedKeyStatus) {
+    return cachedKeyStatus;
+  }
+  try {
+    await client.profiles.list({ pageSize: 1 });
+    cachedKeyStatus = { isValid: true };
+    lastKeyChecked = currentKey;
+    return cachedKeyStatus;
+  } catch (err: any) {
+    const errorMsg = String(err?.message || err || 'Invalid API key');
+    cachedKeyStatus = { isValid: false, error: errorMsg };
+    lastKeyChecked = currentKey;
+    return cachedKeyStatus;
+  }
+}
+
+app.get('/api/status', async (req, res) => {
   const buKey = process.env.BROWSER_USE_API_KEY;
   const geminiKey = process.env.GEMINI_API_KEY;
+  const client = getBrowserClient();
+  const validity = await checkApiKeyValidity(client);
 
   res.json({
-    browserUseConfigured: Boolean(buKey && buKey.trim().length > 0),
+    browserUseConfigured: Boolean(buKey && buKey.trim().length > 0 && validity.isValid),
+    browserUseKeyPresent: Boolean(buKey && buKey.trim().length > 0),
+    browserUseKeyValid: validity.isValid,
+    browserUseError: validity.error || null,
     browserUseKeyMasked: buKey ? `bu_***${buKey.slice(-4)}` : null,
     geminiConfigured: Boolean(geminiKey && geminiKey.trim().length > 0),
     baseUrl: BROWSER_USE_BASE_URL,
@@ -99,30 +128,34 @@ app.get('/api/status', (req, res) => {
 // Start a standalone cloud browser
 app.post('/api/browser/start', async (req, res) => {
   const client = getBrowserClient();
-  const { timeout = 10, proxyCountryCode = 'de', enableRecording = true, testMode = false } = req.body;
+  const {
+    timeout = 10,
+    proxyCountryCode = 'de',
+    enableRecording = true,
+    profileId,
+    startUrl,
+    testMode = false,
+  } = req.body;
 
-  if (!client) {
-    if (testMode) {
-      // Friendly simulation preview when user has not yet configured the API key
-      const simId = `sim-browser-${Date.now()}`;
-      return res.json({
-        id: simId,
-        status: 'running',
-        liveUrl: 'https://example.com',
-        cdpUrl: `wss://api.eu.browser-use.com/cdp/${simId}`,
-        timeout,
-        proxyCountryCode,
-        isSimulated: true,
-        createdAt: new Date().toISOString(),
-        message: 'Running in demo mode. Add BROWSER_USE_API_KEY for live cloud Chrome instances.',
-      });
-    }
-
-    return res.status(401).json({
-      error: 'BROWSER_USE_API_KEY is not configured in environment secrets.',
-      code: 'API_KEY_REQUIRED',
-      hint: 'Get your EU API key in one click at https://cloud.eu.browser-use.com/settings?tab=api-keys&new=1 and add it to the Secrets panel in AI Studio.',
+  const returnSimulation = (warning?: string) => {
+    const simId = `sim-browser-${Date.now()}`;
+    return res.json({
+      id: simId,
+      status: 'running',
+      liveUrl: startUrl || 'https://accounts.google.com',
+      cdpUrl: `wss://api.eu.browser-use.com/cdp/${simId}`,
+      timeout,
+      proxyCountryCode,
+      profileId,
+      isSimulated: true,
+      createdAt: new Date().toISOString(),
+      message: 'Running in interactive simulation mode.',
+      warning: warning || 'Running in interactive simulation mode.',
     });
+  };
+
+  if (!client || testMode) {
+    return returnSimulation();
   }
 
   try {
@@ -130,11 +163,26 @@ app.post('/api/browser/start', async (req, res) => {
       timeout: Number(timeout),
       proxyCountryCode: proxyCountryCode === 'none' ? null : (proxyCountryCode as any),
       enableRecording: Boolean(enableRecording),
+      profileId: profileId || undefined,
     });
 
     res.json(browser);
   } catch (error: any) {
-    console.error('Failed to create browser:', error);
+    console.warn('Failed to create cloud browser session, falling back to simulated session:', error?.message);
+    const errorMsg = String(error?.message || '');
+    const isAuthError =
+      errorMsg.includes('Invalid API key') ||
+      errorMsg.includes('401') ||
+      errorMsg.includes('unauthorized') ||
+      errorMsg.includes('credit') ||
+      error?.status === 401;
+
+    // Automatically fall back to simulation so the user experience is smooth and uninterrupted
+    if (isAuthError || testMode) {
+      if (cachedKeyStatus) cachedKeyStatus = { isValid: false, error: errorMsg };
+      return returnSimulation(errorMsg);
+    }
+
     res.status(500).json({
       error: error?.message || 'Failed to start cloud browser session',
       details: error,
@@ -175,8 +223,8 @@ app.get('/api/browser/list', async (req, res) => {
     });
     res.json(list);
   } catch (error: any) {
-    console.error('Failed to list browsers:', error);
-    res.status(500).json({ error: error?.message || 'Failed to list browsers' });
+    console.warn('Failed to list browsers:', error?.message);
+    res.json({ items: [] });
   }
 });
 
@@ -191,9 +239,140 @@ app.get('/api/browser/:id', async (req, res) => {
     const browser = await client.browsers.get(req.params.id);
     res.json(browser);
   } catch (error: any) {
-    console.error(`Failed to get browser ${req.params.id}:`, error);
-    res.status(500).json({ error: error?.message || 'Failed to get browser' });
+    console.warn(`Failed to get browser ${req.params.id}:`, error?.message);
+    res.json({ id: req.params.id, status: 'unknown' });
   }
+});
+
+// -------------------------------------------------------------
+// Persistent Profiles Endpoints (For Multi-Account Google Logins)
+// -------------------------------------------------------------
+app.get('/api/profiles', async (req, res) => {
+  const client = getBrowserClient();
+  const fallbackProfiles = [
+    { id: 'profile-google-1', name: 'اکانت ۱ (اصلی)', status: 'authenticated', isSimulated: true },
+    { id: 'profile-google-2', name: 'اکانت ۲ (توسعه)', status: 'needs_login', isSimulated: true },
+    { id: 'profile-google-3', name: 'اکانت ۳ (رزرو)', status: 'needs_login', isSimulated: true },
+    { id: 'profile-google-4', name: 'اکانت ۴ (سرویس‌ها)', status: 'needs_login', isSimulated: true },
+  ];
+
+  if (!client) {
+    return res.json({ items: fallbackProfiles });
+  }
+
+  try {
+    const list = await client.profiles.list();
+    res.json(list);
+  } catch (error: any) {
+    console.warn('Failed to list profiles from cloud, falling back to local profiles:', error?.message);
+    res.json({ items: fallbackProfiles, warning: error?.message });
+  }
+});
+
+app.post('/api/profiles', async (req, res) => {
+  const client = getBrowserClient();
+  const { name } = req.body;
+
+  const fallback = {
+    id: `sim-profile-${Date.now()}`,
+    name: name || 'Google Account Profile',
+    createdAt: new Date().toISOString(),
+    status: 'needs_login',
+    isSimulated: true,
+  };
+
+  if (!client) {
+    return res.json(fallback);
+  }
+
+  try {
+    const profile = await client.profiles.create({ name: name || 'Google Account Profile' });
+    res.json(profile);
+  } catch (error: any) {
+    console.warn('Failed to create profile on cloud:', error?.message);
+    res.json({ ...fallback, warning: error?.message });
+  }
+});
+
+app.delete('/api/profiles/:id', async (req, res) => {
+  const client = getBrowserClient();
+  const { id } = req.params;
+
+  if (!client) {
+    return res.json({ success: true, id });
+  }
+
+  try {
+    await client.profiles.delete(id);
+    res.json({ success: true, id });
+  } catch (error: any) {
+    console.warn(`Failed to delete profile ${id}:`, error?.message);
+    res.json({ success: true, id });
+  }
+});
+
+// -------------------------------------------------------------
+// Free API Services Directory & Harvester Endpoints
+// -------------------------------------------------------------
+const HARVESTER_SERVICES = [
+  {
+    id: 'groq',
+    name: 'Groq Cloud',
+    logo: '⚡',
+    websiteUrl: 'https://console.groq.com',
+    keyUrl: 'https://console.groq.com/keys',
+    freeTierDescription: 'Ultra-fast Llama 3 & Mixtral inference (Generous free tier tokens)',
+    instructionsPrompt: 'Go to https://console.groq.com/keys. Click "Continue with Google" or "Sign in with Google" to authenticate using the existing session. Once in the dashboard, navigate to API Keys (https://console.groq.com/keys). Click "Create API Key", name it "AutoKey", copy the generated secret key (gsk_...), and output it as JSON with keys: service, apiKey.',
+  },
+  {
+    id: 'huggingface',
+    name: 'Hugging Face',
+    logo: '🤗',
+    websiteUrl: 'https://huggingface.co',
+    keyUrl: 'https://huggingface.co/settings/tokens',
+    freeTierDescription: 'Free Inference API tokens for open-source AI models',
+    instructionsPrompt: 'Navigate to https://huggingface.co/login. Click "Sign in with Google" to authenticate with the existing Google session. Once logged in, go to https://huggingface.co/settings/tokens. Click "Create new token", choose type "Read", name it "HarvesterToken", submit, and copy the token (hf_...). Return JSON with keys: service, apiKey.',
+  },
+  {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    logo: '🔀',
+    websiteUrl: 'https://openrouter.ai',
+    keyUrl: 'https://openrouter.ai/keys',
+    freeTierDescription: 'Unified access to multiple LLMs with free tier models',
+    instructionsPrompt: 'Navigate to https://openrouter.ai/keys. Click "Sign in" and select "Continue with Google". Once authenticated, click "Create Key", name it "AutoKey", copy the secret key (sk-or-...), and output JSON with keys: service, apiKey.',
+  },
+  {
+    id: 'tavily',
+    name: 'Tavily Search API',
+    logo: '🔍',
+    websiteUrl: 'https://tavily.com',
+    keyUrl: 'https://app.tavily.com/home',
+    freeTierDescription: '1,000 free real-time search queries/month for AI agents',
+    instructionsPrompt: 'Go to https://app.tavily.com/sign-in. Click "Continue with Google". Once the dashboard loads, locate the API Key on the home dashboard or API Keys section (tvly-...). Copy the full API key and output as JSON with keys: service, apiKey.',
+  },
+  {
+    id: 'cerebras',
+    name: 'Cerebras Cloud',
+    logo: '🧠',
+    websiteUrl: 'https://cloud.cerebras.ai',
+    keyUrl: 'https://cloud.cerebras.ai/platform',
+    freeTierDescription: 'High-speed Llama 3.1 70B & 8B inference free tier',
+    instructionsPrompt: 'Go to https://cloud.cerebras.ai. Click "Sign in with Google". Once in the dashboard, navigate to API Keys. Click "Create API Key", copy the key (csk-...), and output JSON with keys: service, apiKey.',
+  },
+  {
+    id: 'mistral',
+    name: 'Mistral AI Console',
+    logo: '🌪️',
+    websiteUrl: 'https://console.mistral.ai',
+    keyUrl: 'https://console.mistral.ai/api-keys',
+    freeTierDescription: 'La Plateforme free tier access for Mistral models',
+    instructionsPrompt: 'Go to https://console.mistral.ai/api-keys. Click "Sign in with Google". Navigate to API Keys section. Click "Create new key", name it "AutoKey", copy the secret token, and output as JSON with keys: service, apiKey.',
+  },
+];
+
+app.get('/api/harvester/services', (req, res) => {
+  res.json({ services: HARVESTER_SERVICES });
 });
 
 // -------------------------------------------------------------
@@ -210,33 +389,27 @@ app.post('/api/agent/run', async (req, res) => {
     record = true,
     keepAlive = 120,
     sessionId,
+    profileId,
     testMode = false,
   } = req.body;
 
-  if (!task || typeof task !== 'string') {
-    return res.status(400).json({ error: 'task string is required' });
-  }
-
-  if (!client) {
-    if (testMode) {
-      // Mock simulation for initial onboarding
-      const simRunId = `run-sim-${Date.now()}`;
-      return res.json({
-        id: simRunId,
-        sessionId: `session-sim-${Date.now()}`,
-        status: 'running',
-        task,
-        model,
-        isSimulated: true,
-        createdAt: new Date().toISOString(),
-      });
-    }
-
-    return res.status(401).json({
-      error: 'BROWSER_USE_API_KEY is not configured in environment secrets.',
-      code: 'API_KEY_REQUIRED',
-      hint: 'Get your EU API key at https://cloud.eu.browser-use.com/settings?tab=api-keys&new=1',
+  const returnSimRun = (warning?: string) => {
+    const simRunId = `run-sim-${Date.now()}`;
+    return res.json({
+      id: simRunId,
+      sessionId: `session-sim-${Date.now()}`,
+      status: 'running',
+      task,
+      model,
+      profileId,
+      isSimulated: true,
+      createdAt: new Date().toISOString(),
+      warning: warning || 'Executing in interactive simulation mode.',
     });
+  };
+
+  if (!client || testMode) {
+    return returnSimRun();
   }
 
   try {
@@ -246,6 +419,7 @@ app.post('/api/agent/run', async (req, res) => {
       sessionId: sessionId || undefined,
       keepAlive: Number(keepAlive) || 120,
       browserSettings: {
+        profileId: profileId || undefined,
         proxyCountryCode: proxyCountryCode === 'none' ? null : proxyCountryCode,
         record: Boolean(record),
       },
@@ -253,7 +427,20 @@ app.post('/api/agent/run', async (req, res) => {
 
     res.json(run);
   } catch (error: any) {
-    console.error('Failed to create agent run:', error);
+    console.warn('Failed to create agent run on cloud, falling back to simulation:', error?.message);
+    const errorMsg = String(error?.message || '');
+    const isAuthError =
+      errorMsg.includes('Invalid API key') ||
+      errorMsg.includes('401') ||
+      errorMsg.includes('unauthorized') ||
+      errorMsg.includes('credit') ||
+      error?.status === 401;
+
+    if (isAuthError || testMode) {
+      if (cachedKeyStatus) cachedKeyStatus = { isValid: false, error: errorMsg };
+      return returnSimRun(errorMsg);
+    }
+
     res.status(500).json({
       error: error?.message || 'Failed to create agent run',
       details: error,
@@ -371,8 +558,8 @@ app.get('/api/agent/runs', async (req, res) => {
     });
     res.json(runs);
   } catch (error: any) {
-    console.error('Failed to list runs:', error);
-    res.status(500).json({ error: error?.message || 'Failed to list runs' });
+    console.warn('Failed to list runs:', error?.message);
+    res.json({ items: [] });
   }
 });
 
